@@ -69,24 +69,48 @@ function main() {
   const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
   const fmtMoney = (v) => (v < 0 ? '-$' : '$') + Math.abs(Math.round(v)).toLocaleString('en-US');
 
-  /* ---------- Camera (zoom & pan) ---------- */
-  const cam = { zoom: 1, x: 0, y: 0 };        // zoom factor; x,y = screen px of world tile (0,0)
-  let baseFit = 18, viewW = 820, viewH = 820, DPR = 1, Z_MAX = 3;
-  const scrTile = () => baseFit * cam.zoom;    // on-screen px per tile
+  /* ---------- Camera + isometric projection (zoom & pan) ----------
+     The city is drawn into the buffer in "buffer px" via bX/bY (isometric).
+     The camera shows a slice of that buffer scaled by `scrScale()` and offset
+     by cam.x/cam.y (screen px of the buffer's top-left). */
+  const cam = { zoom: 1, x: 0, y: 0 };
+  let baseTW = 24, TW = 48, TH = 24, ISO_OX = 0, ISO_OY = 0, maxH = 100;
+  let viewW = 820, viewH = 820, DPR = 1, Z_MAX = 3, bufW = 0, bufH = 0;
+
+  const scrScale = () => (baseTW * cam.zoom) / TW;   // buffer px -> screen px
+  const scrTW    = () => baseTW * cam.zoom;          // on-screen tile width (sprite size unit)
+
+  // buffer-px projection of a continuous tile (fc,fr) at elevation h (buffer px)
+  const bX = (fc, fr)    => ISO_OX + (fc - fr) * (TW / 2);
+  const bY = (fc, fr, h) => ISO_OY + (fc + fr) * (TH / 2) - (h || 0);
+
+  // continuous tile (fc,fr,elevation) -> screen px
+  function tileToScreen(fc, fr, h) {
+    const S = scrScale();
+    return { x: cam.x + bX(fc, fr) * S, y: cam.y + bY(fc, fr, h) * S };
+  }
+  // screen px -> continuous tile coords (on the ground plane)
+  function screenToTile(sx, sy) {
+    const S = scrScale();
+    const px = (sx - cam.x) / S, py = (sy - cam.y) / S;
+    const a = (px - ISO_OX) * 2 / TW;   // fc - fr
+    const b = (py - ISO_OY) * 2 / TH;   // fc + fr
+    return { fc: (a + b) / 2, fr: (b - a) / 2 };
+  }
 
   function clampCam() {
     cam.zoom = clamp(cam.zoom, 1, Z_MAX);
-    const t = scrTile(), mapW = GRID * t, mapH = GRID * t;
+    const S = scrScale(), mapW = bufW * S, mapH = bufH * S;
     cam.x = mapW <= viewW ? (viewW - mapW) / 2 : clamp(cam.x, viewW - mapW, 0);
     cam.y = mapH <= viewH ? (viewH - mapH) / 2 : clamp(cam.y, viewH - mapH, 0);
   }
   function resetView() { cam.zoom = 1; clampCam(); }
   function zoomBy(f) {                          // zoom toward the view centre
-    const cx = viewW / 2, cy = viewH / 2, t0 = scrTile();
-    const wx = (cx - cam.x) / t0, wy = (cy - cam.y) / t0;
+    const cx = viewW / 2, cy = viewH / 2, S0 = scrScale();
+    const bx = (cx - cam.x) / S0, by = (cy - cam.y) / S0;
     cam.zoom = clamp(cam.zoom * f, 1, Z_MAX);
-    const t1 = scrTile();
-    cam.x = cx - wx * t1; cam.y = cy - wy * t1; clampCam();
+    const S1 = scrScale();
+    cam.x = cx - bx * S1; cam.y = cy - by * S1; clampCam();
   }
 
   /* ---------- Map generation ---------- */
@@ -140,8 +164,18 @@ function main() {
     viewH = stage.clientHeight || 820;
     DPR = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
 
-    baseFit = Math.max(8, Math.floor(Math.min(viewW, viewH) / GRID)); // zoom=1 fits the map
-    Z_MAX = 3;
+    Z_MAX = 3.2;
+    // tile width that fits the whole iso diamond both ways at zoom 1
+    baseTW = Math.max(10, Math.floor(Math.min(viewW / GRID, viewH / (GRID / 2 + 5))));
+
+    // buffer (supersampled) iso tile dims, capped so the backing canvas isn't huge
+    TW = Math.min(baseTW * 2, Math.floor(4000 / DPR / GRID));
+    TH = TW / 2;
+    maxH   = TW * 2.6;                 // tallest tower's elevation (buffer px)
+    ISO_OX = GRID * TW / 2;            // shift so the leftmost tile sits at x=0
+    ISO_OY = maxH + TH;               // headroom above the back row for tall buildings
+    bufW   = GRID * TW;               // buffer css width
+    bufH   = ISO_OY + GRID * TH + TH; // buffer css height (ground span + bottom margin)
 
     // visible canvas fills the viewport
     canvas.style.width  = viewW + 'px';
@@ -150,10 +184,8 @@ function main() {
     canvas.height = Math.round(viewH * DPR);
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
 
-    // offscreen buffer holds the whole map at a supersampled tile size (capped for memory)
-    TILE = Math.min(baseFit * 2, Math.floor(4096 / DPR / GRID));
-    scene.width  = Math.round(GRID * TILE * DPR);
-    scene.height = Math.round(GRID * TILE * DPR);
+    scene.width  = Math.round(bufW * DPR);
+    scene.height = Math.round(bufH * DPR);
     sctx.setTransform(DPR, 0, 0, DPR, 0, 0);
 
     clampCam();
@@ -384,310 +416,235 @@ function main() {
     g.closePath();
   }
 
-  // Per-frame: blit the buffer (re-rendering it first if the map changed),
-  // then draw the live hover cursor on top.
+  // Per-frame: blit the city buffer through the camera, then live agents + hover.
   function render() {
     if (dirty) { renderScene(); dirty = false; }
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    // blit the whole-map buffer into the current camera view
-    const t = scrTile();
+    const S = scrScale();
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(scene, 0, 0, scene.width, scene.height,
-                  cam.x * DPR, cam.y * DPR, GRID * t * DPR, GRID * t * DPR);
+                  cam.x * DPR, cam.y * DPR, bufW * S * DPR, bufH * S * DPR);
     ctx.restore();
     drawAgents();
     drawHover();
   }
 
-  // Full redraw of the city into the offscreen buffer.
+  // path the diamond footprint of tile (c,r), inset by `ins` tiles, at elevation h
+  function diamond(g, c, r, ins, h) {
+    const a = c + ins, b = c + 1 - ins, p = r + ins, q = r + 1 - ins;
+    g.beginPath();
+    g.moveTo(bX(a, p), bY(a, p, h));   // north / top
+    g.lineTo(bX(b, p), bY(b, p, h));   // east  / right
+    g.lineTo(bX(b, q), bY(b, q, h));   // south / bottom
+    g.lineTo(bX(a, q), bY(a, q, h));   // west  / left
+    g.closePath();
+  }
+
+  // Full redraw of the isometric city into the offscreen buffer.
   function renderScene() {
-    const W = GRID * TILE, H = GRID * TILE;
-    sctx.clearRect(0, 0, W, H);
+    sctx.clearRect(0, 0, bufW, bufH);
+    rebuildNetwork();   // refresh road list, lampposts, agent counts
 
-    // grass gradient base (smooth, no per-tile colour blocks)
-    const bg = sctx.createLinearGradient(0, 0, 0, H);
-    bg.addColorStop(0, '#43592b');
-    bg.addColorStop(1, '#2c3c1b');
-    sctx.fillStyle = bg;
-    sctx.fillRect(0, 0, W, H);
-
+    // PASS 1 — ground (grass / water / road / park / undeveloped plots)
     for (let r = 0; r < GRID; r++)
       for (let c = 0; c < GRID; c++)
-        drawTile(c, r, map[idx(c, r)]);
+        drawGroundIso(c, r, map[idx(c, r)]);
 
-    // refresh the agent road-network and paint lampposts into the buffer
-    rebuildNetwork();
-    for (const pole of poles) drawPole(pole);
-
-    // soft vignette for depth
-    const vg = sctx.createRadialGradient(
-      W / 2, H / 2, Math.min(W, H) * 0.32,
-      W / 2, H / 2, Math.max(W, H) * 0.62);
-    vg.addColorStop(0, 'rgba(0,0,0,0)');
-    vg.addColorStop(1, 'rgba(0,0,0,0.22)');
-    sctx.fillStyle = vg;
-    sctx.fillRect(0, 0, W, H);
-  }
-
-  function drawTile(c, r, tile) {
-    const x = c * TILE, y = r * TILE, t = tile.t;
-    // water & road fill the whole tile; everything else sits on grass
-    if (t === T.WATER) { drawWater(c, r, x, y); return; }
-    if (t === T.ROAD)  { drawRoad(c, r, x, y); return; }
-    drawGrass(c, r, x, y);
-    switch (t) {
-      case T.TREE:   drawTree(x, y); return;
-      case T.PARK:   drawPark(x, y); return;
-      case T.POWER:  drawService(x, y, tile, '#6b5a2a', '⚡', true);  return;
-      case T.POLICE: drawService(x, y, tile, '#2b4a8a', '🚓', false); return;
-      case T.FIRE:   drawService(x, y, tile, '#8a2b2b', '🚒', false); return;
-      case T.RES: case T.COM: case T.IND: drawZone(x, y, tile); return;
+    // PASS 2 — tall objects, back-to-front by (c + r) so nearer ones occlude farther
+    for (let d = 0; d <= 2 * (GRID - 1); d++) {
+      const cLo = Math.max(0, d - (GRID - 1)), cHi = Math.min(GRID - 1, d);
+      for (let c = cLo; c <= cHi; c++) {
+        const r = d - c, i = idx(c, r), tile = map[i], t = tile.t;
+        if (t === T.TREE)        drawTreeIso(c, r);
+        else if (t === T.POWER)  drawServiceIso(c, r, tile, '#7a6a34', '⚡', true);
+        else if (t === T.POLICE) drawServiceIso(c, r, tile, '#2f5296', '🚓', false);
+        else if (t === T.FIRE)   drawServiceIso(c, r, tile, '#9c3030', '🚒', false);
+        else if (isZone(t) && tile.lvl > 0) drawBuildingIso(c, r, tile);
+        if (poleByTile[i]) drawPoleIso(c, r);
+      }
     }
   }
 
-  // tiny deterministic flecks → organic grass texture with no block edges
-  function drawGrass(c, r, x, y) {
-    const s = Math.max(1, TILE * 0.07);
-    for (let k = 0; k < 2; k++) {
-      const hx = ((c * 7 + r * 13 + k * 29) % 17) / 17;
-      const hy = ((c * 11 + r * 5 + k * 19) % 13) / 13;
-      sctx.fillStyle = (k % 2) ? 'rgba(150,180,90,0.20)' : 'rgba(40,60,25,0.20)';
-      sctx.fillRect(x + hx * TILE, y + hy * TILE, s, s);
+  function drawGroundIso(c, r, tile) {
+    const t = tile.t, cx = bX(c + 0.5, r + 0.5), cy = bY(c + 0.5, r + 0.5);
+    if (t === T.WATER) {
+      sctx.fillStyle = '#1f4f74'; diamond(sctx, c, r, -0.02, 0); sctx.fill();
+      sctx.fillStyle = 'rgba(255,255,255,0.06)'; diamond(sctx, c, r, 0.34, 0); sctx.fill();
+      return;
+    }
+    // grass base (slight per-tile variation, tiny overlap to hide seams)
+    sctx.fillStyle = ['#3f5527', '#43592b', '#39501f'][(c * 3 + r * 7) % 3];
+    diamond(sctx, c, r, -0.03, 0); sctx.fill();
+
+    if (t === T.ROAD) { drawRoadIso(c, r); return; }
+    if (t === T.PARK) {
+      sctx.fillStyle = '#2f6b2a'; diamond(sctx, c, r, 0.12, 0); sctx.fill();
+      sctx.fillStyle = '#3e8a33'; sctx.beginPath(); sctx.arc(cx, cy - TH * 0.1, TW * 0.12, 0, 7); sctx.fill();
+      sctx.fillStyle = '#4c9b3d'; sctx.beginPath(); sctx.arc(cx + TW * 0.14, cy + TH * 0.1, TW * 0.09, 0, 7); sctx.fill();
+      return;
+    }
+    if (isZone(t) && tile.lvl === 0) {                 // zoned but undeveloped
+      const P = ZONE_PAL[t];
+      sctx.fillStyle = P.empty; diamond(sctx, c, r, 0.14, 0); sctx.fill();
+      sctx.strokeStyle = P.edge; sctx.lineWidth = Math.max(1, TW * 0.03);
+      diamond(sctx, c, r, 0.16, 0); sctx.stroke();
+      sctx.fillStyle = 'rgba(255,255,255,0.4)';
+      sctx.font = '600 ' + (TW * 0.32) + 'px -apple-system, sans-serif';
+      sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
+      sctx.fillText(P.letter, cx, cy - TH * 0.12);
     }
   }
 
-  function drawWater(c, r, x, y) {
-    const grd = sctx.createLinearGradient(x, y, x, y + TILE);
-    grd.addColorStop(0, '#2a6390');
-    grd.addColorStop(1, '#173f5f');
-    sctx.fillStyle = grd;
-    sctx.fillRect(x, y, TILE, TILE);
-    // ripple highlights
-    sctx.fillStyle = 'rgba(255,255,255,0.07)';
-    const off = ((c * 3 + r * 5) % 5) / 5 * TILE;
-    sctx.fillRect(x + TILE * 0.14, y + off * 0.4 + TILE * 0.2, TILE * 0.5, Math.max(1, TILE * 0.05));
-    sctx.fillRect(x + TILE * 0.42, y + off * 0.4 + TILE * 0.5, TILE * 0.32, Math.max(1, TILE * 0.04));
-    // sandy shoreline against any adjacent land
-    const land = (cc, rr) => !inB(cc, rr) || map[idx(cc, rr)].t !== T.WATER;
-    const w = Math.max(1, TILE * 0.12);
-    sctx.fillStyle = 'rgba(190,205,150,0.20)';
-    if (land(c, r - 1)) sctx.fillRect(x, y, TILE, w);
-    if (land(c, r + 1)) sctx.fillRect(x, y + TILE - w, TILE, w);
-    if (land(c - 1, r)) sctx.fillRect(x, y, w, TILE);
-    if (land(c + 1, r)) sctx.fillRect(x + TILE - w, y, w, TILE);
-  }
-
-  function drawTree(x, y) {
-    const cx = x + TILE / 2, cy = y + TILE * 0.5, R = TILE * 0.33;
-    sctx.fillStyle = 'rgba(0,0,0,0.22)';
-    sctx.beginPath();
-    sctx.ellipse(cx + TILE * 0.05, cy + TILE * 0.18, R * 0.95, R * 0.5, 0, 0, 7);
-    sctx.fill();
-    sctx.fillStyle = '#5b3d22';
-    sctx.fillRect(cx - Math.max(1, TILE * 0.04), cy, Math.max(1.5, TILE * 0.08), TILE * 0.26);
-    sctx.fillStyle = '#274d1c';
-    sctx.beginPath(); sctx.arc(cx, cy, R, 0, 7); sctx.fill();
-    sctx.fillStyle = '#356b27';
-    sctx.beginPath(); sctx.arc(cx - R * 0.25, cy - R * 0.25, R * 0.72, 0, 7); sctx.fill();
-    sctx.fillStyle = '#4f8f37';
-    sctx.beginPath(); sctx.arc(cx - R * 0.38, cy - R * 0.42, R * 0.4, 0, 7); sctx.fill();
-  }
-
-  function drawPark(x, y) {
-    const pad = TILE * 0.1;
-    const grd = sctx.createLinearGradient(0, y, 0, y + TILE);
-    grd.addColorStop(0, '#357a2b');
-    grd.addColorStop(1, '#245420');
-    sctx.fillStyle = grd;
-    roundRect(sctx, x + pad, y + pad, TILE - pad * 2, TILE - pad * 2, TILE * 0.16);
-    sctx.fill();
-    // winding path
-    sctx.strokeStyle = 'rgba(214,200,150,0.55)';
-    sctx.lineWidth = Math.max(1, TILE * 0.07);
-    sctx.beginPath();
-    sctx.moveTo(x + TILE * 0.2, y + TILE * 0.82);
-    sctx.quadraticCurveTo(x + TILE * 0.5, y + TILE * 0.5, x + TILE * 0.82, y + TILE * 0.2);
-    sctx.stroke();
-    // bushes
-    sctx.fillStyle = '#3e8a33';
-    sctx.beginPath(); sctx.arc(x + TILE * 0.3, y + TILE * 0.32, TILE * 0.13, 0, 7); sctx.fill();
-    sctx.fillStyle = '#4c9b3d';
-    sctx.beginPath(); sctx.arc(x + TILE * 0.7, y + TILE * 0.7, TILE * 0.12, 0, 7); sctx.fill();
-  }
-
-  function drawRoad(c, r, x, y) {
+  function drawRoadIso(c, r) {
     const isR = (cc, rr) => inB(cc, rr) && map[idx(cc, rr)].t === T.ROAD;
-    const up = isR(c, r - 1), dn = isR(c, r + 1), lt = isR(c - 1, r), rt = isR(c + 1, r);
-    const links = up + dn + lt + rt;
-    // asphalt
-    const grd = sctx.createLinearGradient(x, y, x, y + TILE);
-    grd.addColorStop(0, '#454951');
-    grd.addColorStop(1, '#34383e');
-    sctx.fillStyle = grd;
-    sctx.fillRect(x, y, TILE, TILE);
-    // curbs on the open sides (where the road doesn't continue)
-    const cw = Math.max(1, TILE * 0.1);
-    sctx.fillStyle = '#5b616b';
-    if (!up) sctx.fillRect(x, y, TILE, cw);
-    if (!dn) sctx.fillRect(x, y + TILE - cw, TILE, cw);
-    if (!lt) sctx.fillRect(x, y, cw, TILE);
-    if (!rt) sctx.fillRect(x + TILE - cw, y, cw, TILE);
-    // lane markings (skip on junctions for a clean intersection)
-    if (links <= 2) {
-      sctx.fillStyle = 'rgba(232,206,92,0.85)';
-      const mw = Math.max(1, TILE * 0.05), mid = TILE / 2, step = TILE * 0.4;
-      if (lt || rt) {
-        const sx = lt ? x : x + mid, ex = rt ? x + TILE : x + mid;
-        for (let px = sx; px < ex - 1; px += step)
-          sctx.fillRect(px, y + mid - mw / 2, Math.min(TILE * 0.22, ex - px), mw);
-      }
-      if (up || dn) {
-        const sy = up ? y : y + mid, ey = dn ? y + TILE : y + mid;
-        for (let py = sy; py < ey - 1; py += step)
-          sctx.fillRect(x + mid - mw / 2, py, mw, Math.min(TILE * 0.22, ey - py));
-      }
-    }
+    sctx.fillStyle = '#3c4047'; diamond(sctx, c, r, 0.0, 0); sctx.fill();
+    sctx.strokeStyle = 'rgba(232,206,92,0.8)';
+    sctx.lineWidth = Math.max(1, TW * 0.035);
+    sctx.setLineDash([TW * 0.1, TW * 0.12]);
+    const cx = bX(c + 0.5, r + 0.5), cy = bY(c + 0.5, r + 0.5);
+    const seg = (fc, fr) => { sctx.beginPath(); sctx.moveTo(cx, cy); sctx.lineTo(bX(fc, fr), bY(fc, fr)); sctx.stroke(); };
+    if (isR(c, r - 1)) seg(c + 0.5, r);
+    if (isR(c, r + 1)) seg(c + 0.5, r + 1);
+    if (isR(c - 1, r)) seg(c, r + 0.5);
+    if (isR(c + 1, r)) seg(c + 1, r + 0.5);
+    sctx.setLineDash([]);
   }
 
-  function drawService(x, y, tile, body, glyphCh, hideBadge) {
-    const pad = TILE * 0.14, w = TILE - pad * 2, h = TILE - pad * 2;
-    // shadow
-    sctx.fillStyle = 'rgba(0,0,0,0.32)';
-    roundRect(sctx, x + pad + TILE * 0.05, y + pad + TILE * 0.07, w, h, TILE * 0.14);
-    sctx.fill();
-    // body
-    const grd = sctx.createLinearGradient(0, y + pad, 0, y + pad + h);
-    grd.addColorStop(0, shade(body, 40));
-    grd.addColorStop(1, body);
-    sctx.fillStyle = grd;
-    roundRect(sctx, x + pad, y + pad, w, h, TILE * 0.14);
-    sctx.fill();
-    // roof highlight band
-    sctx.fillStyle = 'rgba(255,255,255,0.14)';
-    roundRect(sctx, x + pad, y + pad, w, h * 0.34, TILE * 0.14);
-    sctx.fill();
-    glyph(glyphCh, x, y);
-    if (!hideBadge && !tile.pwr) noPower(x, y);
+  function drawTreeIso(c, r) {
+    const x = bX(c + 0.5, r + 0.5), gy = bY(c + 0.5, r + 0.5), R = TW * 0.26;
+    sctx.fillStyle = 'rgba(0,0,0,0.2)';
+    sctx.beginPath(); sctx.ellipse(x, gy, R * 0.9, R * 0.45, 0, 0, 7); sctx.fill();
+    sctx.fillStyle = '#5b3d22'; sctx.fillRect(x - TW * 0.03, gy - TH * 0.62, TW * 0.06, TH * 0.62);
+    sctx.fillStyle = '#274d1c'; sctx.beginPath(); sctx.arc(x, gy - TH * 0.72, R, 0, 7); sctx.fill();
+    sctx.fillStyle = '#356b27'; sctx.beginPath(); sctx.arc(x - R * 0.3, gy - TH * 0.92, R * 0.7, 0, 7); sctx.fill();
+    sctx.fillStyle = '#4f8f37'; sctx.beginPath(); sctx.arc(x - R * 0.42, gy - TH * 1.08, R * 0.42, 0, 7); sctx.fill();
+  }
+
+  function drawPoleIso(c, r) {
+    const p = poleByTile[idx(c, r)];
+    const x = bX(p.x, p.y), gy = bY(p.x, p.y), h = TH * 1.2;
+    sctx.fillStyle = '#23262c'; sctx.fillRect(x - Math.max(1, TW * 0.018), gy - h, Math.max(1.5, TW * 0.036), h);
+    sctx.fillStyle = '#3a3f47'; sctx.fillRect(x - TW * 0.05, gy - h - TH * 0.12, TW * 0.1, TH * 0.14);
+    sctx.fillStyle = 'rgba(255,224,150,0.6)'; sctx.beginPath(); sctx.arc(x, gy - h - TH * 0.02, TW * 0.05, 0, 7); sctx.fill();
   }
 
   const ZONE_PAL = {
-    [T.RES]: { top: '#5fbf73', bot: '#2f7a44', roof: '#26603a', empty: 'rgba(81,207,102,0.16)', edge: '#3fae5a', letter: 'R' },
-    [T.COM]: { top: '#5aa9e6', bot: '#2f6fa3', roof: '#27567e', empty: 'rgba(76,194,255,0.16)', edge: '#3f93d6', letter: 'C' },
-    [T.IND]: { top: '#d8b24a', bot: '#937223', roof: '#6f5519', empty: 'rgba(255,212,59,0.16)', edge: '#c9a13a', letter: 'I' },
+    // RES = cream-walled houses with terracotta roofs; COM = glassy blue; IND = tan/grey
+    [T.RES]: { top: '#ecd9b0', bot: '#cdb487', roof: '#b6452f', empty: 'rgba(120,200,120,0.18)', edge: '#5bbf6e', letter: 'R' },
+    [T.COM]: { top: '#7fb4e6', bot: '#5184b4', roof: '#2c597f', empty: 'rgba(76,194,255,0.18)', edge: '#3f93d6', letter: 'C' },
+    [T.IND]: { top: '#cdb46a', bot: '#a08c4e', roof: '#5f5346', empty: 'rgba(255,212,59,0.18)', edge: '#c9a13a', letter: 'I' },
   };
+  // massing tables, indexed by level 1..5 (0 unused): storeys (height), footprint inset, roof style
+  const STOREYS = { [T.RES]: [0, 1.0, 1.5, 2.2, 3.2, 4.2], [T.COM]: [0, 1.2, 1.9, 2.8, 3.9, 5.0], [T.IND]: [0, 1.0, 1.3, 1.7, 2.2, 2.8] };
+  const INSET   = { [T.RES]: [0, 0.26, 0.22, 0.18, 0.15, 0.12], [T.COM]: [0, 0.2, 0.17, 0.14, 0.11, 0.09], [T.IND]: [0, 0.14, 0.12, 0.1, 0.09, 0.08] };
+  const ROOF    = { [T.RES]: [0, 'hip', 'hip', 'hip', 'flat', 'flat'], [T.COM]: [0, 'flat', 'flat', 'flat', 'flat', 'flat'], [T.IND]: [0, 'flat', 'flat', 'flat', 'flat', 'flat'] };
 
-  function drawZone(x, y, tile) {
-    const P = ZONE_PAL[tile.t];
-
-    if (tile.lvl === 0) {
-      // zoned but undeveloped — tinted plot with dashed border + faint letter
-      sctx.fillStyle = P.empty;
-      roundRect(sctx, x + TILE * 0.12, y + TILE * 0.12, TILE * 0.76, TILE * 0.76, TILE * 0.08);
-      sctx.fill();
-      sctx.strokeStyle = P.edge;
-      sctx.lineWidth = Math.max(1, TILE * 0.045);
-      sctx.setLineDash([TILE * 0.14, TILE * 0.1]);
-      roundRect(sctx, x + TILE * 0.15, y + TILE * 0.15, TILE * 0.7, TILE * 0.7, TILE * 0.08);
-      sctx.stroke();
-      sctx.setLineDash([]);
-      sctx.fillStyle = 'rgba(255,255,255,0.35)';
-      sctx.font = '600 ' + (TILE * 0.4) + 'px -apple-system, sans-serif';
-      sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
-      sctx.fillText(P.letter, x + TILE / 2, y + TILE * 0.54);
-      return;
-    }
-
-    const lv = tile.lvl;                       // 1..5
-    const f = lv / MAX_LVL;                     // 0.2..1
-    const inset = TILE * (0.2 - f * 0.08);      // larger footprint at higher level
-    const bx = x + inset, bw = TILE - inset * 2;
-    const lift = TILE * (0.08 + f * 0.52);      // taller with level
-    const by = y + inset - lift + TILE * 0.08;  // top of building
-    const groundY = y + TILE - inset;
-    const bh = groundY - by;                    // wall height down to the ground
-
-    // ground shadow
-    sctx.fillStyle = 'rgba(0,0,0,0.28)';
-    roundRect(sctx, bx + TILE * 0.1, groundY - TILE * 0.05, bw, TILE * 0.13, TILE * 0.05);
-    sctx.fill();
-
-    // wall (vertical gradient)
-    const wg = sctx.createLinearGradient(0, by, 0, by + bh);
-    wg.addColorStop(0, P.top);
-    wg.addColorStop(1, P.bot);
-    sctx.fillStyle = wg;
-    sctx.fillRect(bx, by, bw, bh);
-    // 3D edges: lit left, shaded right
-    const edge = Math.max(1, bw * 0.12);
-    sctx.fillStyle = 'rgba(255,255,255,0.1)';
-    sctx.fillRect(bx, by, edge, bh);
-    sctx.fillStyle = 'rgba(0,0,0,0.16)';
-    sctx.fillRect(bx + bw - edge, by, edge, bh);
-
-    // roof slab + parapet highlight
-    sctx.fillStyle = P.roof;
-    sctx.fillRect(bx, by, bw, Math.max(2, TILE * 0.12));
-    sctx.fillStyle = 'rgba(255,255,255,0.14)';
-    sctx.fillRect(bx, by, bw, Math.max(1, TILE * 0.03));
-    if (lv >= 3) { // rooftop unit on taller buildings
-      sctx.fillStyle = P.roof;
-      sctx.fillRect(bx + bw * 0.55, by - TILE * 0.08, bw * 0.28, TILE * 0.08);
-    }
-
-    // windows — lit warm when powered, dark when not
-    const cols = clamp(Math.round(lv * 0.8) + 1, 2, 4);
-    const rows = clamp(lv, 1, 4);
-    const padX = bw * 0.18, padTop = TILE * 0.16;
-    const cellW = (bw - padX * 2) / cols;
-    const cellH = (bh - padTop - bh * 0.14) / rows;
-    const winW = Math.max(1.5, cellW * 0.55), winH = Math.max(1.5, cellH * 0.55);
+  // one extruded wall face spanning ground edge g0→g1 up to elevation H, with lit/dark windows
+  function wallFace(g0, g1, H, color, rows, pwr) {
+    sctx.fillStyle = color;
+    sctx.beginPath();
+    sctx.moveTo(bX(g0[0], g0[1]), bY(g0[0], g0[1], 0));
+    sctx.lineTo(bX(g1[0], g1[1]), bY(g1[0], g1[1], 0));
+    sctx.lineTo(bX(g1[0], g1[1]), bY(g1[0], g1[1], H));
+    sctx.lineTo(bX(g0[0], g0[1]), bY(g0[0], g0[1], H));
+    sctx.closePath(); sctx.fill();
+    const cols = 2, ww = TW * 0.06, wh = TH * 0.2;
     for (let wr = 0; wr < rows; wr++) {
       for (let wc = 0; wc < cols; wc++) {
-        const seed = (wr * 3 + wc * 7 + lv * 5) % 5;
-        const lit = tile.pwr && seed !== 0;
-        sctx.fillStyle = lit ? 'rgba(255,224,150,0.92)'
-                       : tile.pwr ? 'rgba(180,200,220,0.5)'
-                       : 'rgba(38,52,68,0.72)';
-        sctx.fillRect(bx + padX + wc * cellW + (cellW - winW) / 2,
-                      by + padTop + wr * cellH + (cellH - winH) / 2, winW, winH);
+        const u = (wc + 0.5) / cols, v = (wr + 0.42) / (rows + 0.25);
+        const fc = g0[0] + (g1[0] - g0[0]) * u, fr = g0[1] + (g1[1] - g0[1]) * u;
+        const lit = pwr && ((wr * 3 + wc * 7 + rows) % 4 !== 0);
+        sctx.fillStyle = lit ? 'rgba(255,224,150,0.95)' : (pwr ? 'rgba(190,205,220,0.5)' : 'rgba(35,48,62,0.72)');
+        sctx.fillRect(bX(fc, fr) - ww / 2, bY(fc, fr, v * H) - wh / 2, ww, wh);
       }
     }
-    if (!tile.pwr) noPower(x, y);
   }
 
-  function glyph(ch, x, y) {
-    sctx.font = (TILE * 0.62) + 'px -apple-system, "Segoe UI Emoji", sans-serif';
+  // a developed zone as an isometric box that grows taller & wider with level
+  function drawBuildingIso(c, r, tile) {
+    const t = tile.t, lv = tile.lvl, P = ZONE_PAL[t];
+    const SH = TH * 0.82, H = STOREYS[t][lv] * SH, ins = INSET[t][lv];
+    const a = c + ins, b = c + 1 - ins, p = r + ins, q = r + 1 - ins;
+    const N = [a, p], E = [b, p], S = [b, q], W = [a, q];
+    const rows = clamp(Math.round(STOREYS[t][lv]), 1, 5);
+
+    sctx.fillStyle = 'rgba(0,0,0,0.2)'; diamond(sctx, c + 0.06, r + 0.06, ins, 0); sctx.fill();  // shadow
+    wallFace(W, S, H, P.bot, rows, tile.pwr);    // left wall (shaded)
+    wallFace(S, E, H, P.top, rows, tile.pwr);    // right wall (lit)
+
+    if (ROOF[t][lv] === 'hip') {                 // pitched roof → reads as a house
+      const rise = SH * (t === T.RES ? 0.85 : 0.55);
+      const ax = bX(c + 0.5, r + 0.5), ay = bY(c + 0.5, r + 0.5, H + rise);
+      const slope = (g0, g1, col) => {
+        sctx.fillStyle = col; sctx.beginPath();
+        sctx.moveTo(bX(g0[0], g0[1]), bY(g0[0], g0[1], H));
+        sctx.lineTo(bX(g1[0], g1[1]), bY(g1[0], g1[1], H));
+        sctx.lineTo(ax, ay); sctx.closePath(); sctx.fill();
+      };
+      slope(W, S, shade(P.roof, -14));           // left slope
+      slope(S, E, shade(P.roof, 14));            // right slope (lit)
+    } else {                                     // flat roof slab
+      sctx.fillStyle = shade(P.roof, 16); diamond(sctx, c, r, ins, H); sctx.fill();
+      if (lv >= 4) {                             // rooftop unit on towers
+        const du = 0.16, rh = H + SH * 0.5;
+        sctx.fillStyle = shade(P.roof, -4);
+        sctx.beginPath();
+        sctx.moveTo(bX(c + 0.5 - du, r + 0.5 - du), bY(c + 0.5 - du, r + 0.5 - du, rh));
+        sctx.lineTo(bX(c + 0.5 + du, r + 0.5 - du), bY(c + 0.5 + du, r + 0.5 - du, rh));
+        sctx.lineTo(bX(c + 0.5 + du, r + 0.5 + du), bY(c + 0.5 + du, r + 0.5 + du, rh));
+        sctx.lineTo(bX(c + 0.5 - du, r + 0.5 + du), bY(c + 0.5 - du, r + 0.5 + du, rh));
+        sctx.closePath(); sctx.fill();
+      }
+    }
+    if (t === T.IND && lv >= 2) {                // factory chimney
+      const fx = c + 0.72, fy = r + 0.72, ch = SH * 1.3;
+      sctx.fillStyle = '#6b5550';
+      sctx.fillRect(bX(fx, fy) - TW * 0.025, bY(fx, fy, H + ch), TW * 0.05, ch);
+    }
+    if (!tile.pwr) noPowerIso(c, r, H + SH);
+  }
+
+  function drawServiceIso(c, r, tile, body, glyphCh, hideBadge) {
+    const SH = TH * 0.82, H = SH * 1.7, ins = 0.14;
+    const a = c + ins, b = c + 1 - ins, p = r + ins, q = r + 1 - ins;
+    const S = [b, q], E = [b, p], W = [a, q];
+    sctx.fillStyle = 'rgba(0,0,0,0.2)'; diamond(sctx, c + 0.06, r + 0.06, ins, 0); sctx.fill();
+    wallFace(W, S, H, shade(body, -16), 2, false);
+    wallFace(S, E, H, shade(body, 12), 2, false);
+    sctx.fillStyle = shade(body, 30); diamond(sctx, c, r, ins, H); sctx.fill();
+    sctx.font = (TW * 0.46) + 'px -apple-system, "Segoe UI Emoji", sans-serif';
     sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
-    sctx.fillText(ch, x + TILE / 2, y + TILE * 0.54);
+    sctx.fillText(glyphCh, bX(c + 0.5, r + 0.5), bY(c + 0.5, r + 0.5, H + TH * 0.5));
+    if (!hideBadge && !tile.pwr) noPowerIso(c, r, H);
   }
 
-  // small red ⚡ badge in the tile's top-right corner
-  function noPower(x, y) {
-    const rad = Math.max(4, TILE * 0.16);
-    const cx = x + TILE - rad - TILE * 0.04, cy = y + rad + TILE * 0.04;
+  // small red ⚡ badge floating above an unpowered building
+  function noPowerIso(c, r, H) {
+    const x = bX(c + 0.5, r + 0.5), y = bY(c + 0.5, r + 0.5, H + TH * 0.5), rad = TW * 0.13;
     sctx.fillStyle = 'rgba(120,20,20,0.92)';
-    sctx.beginPath(); sctx.arc(cx, cy, rad, 0, 7); sctx.fill();
-    sctx.fillStyle = '#ffd6d6';
-    sctx.font = (rad * 1.5) + 'px sans-serif';
+    sctx.beginPath(); sctx.arc(x, y, rad, 0, 7); sctx.fill();
+    sctx.fillStyle = '#ffd6d6'; sctx.font = (rad * 1.6) + 'px sans-serif';
     sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
-    sctx.fillText('⚡', cx, cy + rad * 0.05);
+    sctx.fillText('⚡', x, y + rad * 0.05);
   }
 
-  // live hover cursor drawn on the main canvas, on top of the buffer
+  // live hover cursor — an isometric diamond on the hovered tile
   function drawHover() {
     if (hoverIdx < 0) return;
     const c = hoverIdx % GRID, r = (hoverIdx / GRID) | 0;
-    const s = scrTile(), x = cam.x + c * s, y = cam.y + r * s;
     const bad = tool.id === 'bull';
+    const a = tileToScreen(c, r, 0), b = tileToScreen(c + 1, r, 0),
+          d = tileToScreen(c + 1, r + 1, 0), e = tileToScreen(c, r + 1, 0);
     ctx.save();
-    ctx.fillStyle = bad ? 'rgba(255,90,90,0.18)' : 'rgba(120,200,255,0.15)';
-    ctx.fillRect(x, y, s, s);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(d.x, d.y); ctx.lineTo(e.x, e.y); ctx.closePath();
+    ctx.fillStyle = bad ? 'rgba(255,90,90,0.2)' : 'rgba(120,200,255,0.18)';
+    ctx.fill();
     ctx.strokeStyle = bad ? 'rgba(255,120,120,0.95)' : 'rgba(160,220,255,0.95)';
-    const lw = Math.max(1, s * 0.06);
-    ctx.lineWidth = lw;
-    ctx.strokeRect(x + lw / 2, y + lw / 2, s - lw, s - lw);
+    ctx.lineWidth = Math.max(1, scrTW() * 0.05);
+    ctx.stroke();
     ctx.restore();
   }
 
@@ -836,63 +793,75 @@ function main() {
     }
   }
 
-  // current SCREEN position of an agent (interpolated between tiles, + lane offset, + camera)
-  function agentPixel(a) {
-    const dx = a.nc - a.c, dy = a.nr - a.r;        // heading (unit or 0 when standing)
-    const cx = a.c + 0.5 + dx * a.t, cy = a.r + 0.5 + dy * a.t;
-    const t = scrTile();
-    return { x: cam.x + (cx - dy * a.lane) * t, y: cam.y + (cy + dx * a.lane) * t, dx, dy };
+  // continuous tile position of an agent (incl. perpendicular lane offset) + heading
+  function agentTile(a) {
+    const dx = a.nc - a.c, dy = a.nr - a.r;
+    const fc = a.c + 0.5 + dx * a.t - dy * a.lane;
+    const fr = a.r + 0.5 + dy * a.t + dx * a.lane;
+    return { fc, fr, dx, dy };
   }
 
+  // draw the live layer, depth-sorted (by fc+fr) so nearer agents overlap farther ones
   function drawAgents() {
     if (!lifeOn) return;
-    for (const m of marks) drawMark(m);
-    for (const a of cars) drawCar(a);
-    for (const a of dogs) drawDog(a);
-    for (const a of peds) drawPed(a);
+    const items = [];
+    for (const m of marks) items.push({ m, d: m.x + m.y });
+    for (const a of cars) { const p = agentTile(a); items.push({ a, p, d: p.fc + p.fr - 0.1 }); }
+    for (const a of dogs) { const p = agentTile(a); items.push({ a, p, d: p.fc + p.fr }); }
+    for (const a of peds) { const p = agentTile(a); items.push({ a, p, d: p.fc + p.fr }); }
+    items.sort((u, v) => u.d - v.d);
+    for (const it of items) {
+      if (it.m) drawMark(it.m);
+      else if (it.a.kind === 'car') drawCar(it.a, it.p);
+      else if (it.a.kind === 'dog') drawDog(it.a, it.p);
+      else drawPed(it.a, it.p);
+    }
   }
 
   function drawMark(m) {
     const a = 1 - m.age / m.ttl;
     if (a <= 0) return;
-    const s = scrTile();
-    ctx.fillStyle = 'rgba(226,206,72,' + (0.3 * a).toFixed(3) + ')';
-    ctx.beginPath();
-    ctx.ellipse(cam.x + m.x * s, cam.y + m.y * s, s * 0.09, s * 0.05, 0, 0, 6.3);
-    ctx.fill();
+    const g = tileToScreen(m.x, m.y, 0), s = scrTW();
+    ctx.fillStyle = 'rgba(226,206,72,' + (0.32 * a).toFixed(3) + ')';
+    ctx.beginPath(); ctx.ellipse(g.x, g.y, s * 0.16, s * 0.08, 0, 0, 6.3); ctx.fill();
   }
 
-  function drawPed(a) {
-    const { x, y } = agentPixel(a), s = scrTile(), walking = a.state === 'walk';
-    const bob = walking ? Math.abs(Math.sin(a.phase)) * s * 0.03 : 0;
-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
-    ctx.beginPath(); ctx.ellipse(x, y, s * 0.1, s * 0.05, 0, 0, 6.3); ctx.fill();
-    const sw = walking ? Math.sin(a.phase) * s * 0.06 : 0;        // leg swing
-    ctx.strokeStyle = '#2b2f36'; ctx.lineWidth = Math.max(1, s * 0.04);
-    ctx.beginPath();
-    ctx.moveTo(x - s * 0.03, y - s * 0.03); ctx.lineTo(x - s * 0.03 + sw, y);
-    ctx.moveTo(x + s * 0.03, y - s * 0.03); ctx.lineTo(x + s * 0.03 - sw, y);
-    ctx.stroke();
-    const by = y - s * 0.14 - bob;
-    ctx.fillStyle = a.color;                                      // shirt
-    roundRect(ctx, x - s * 0.07, by, s * 0.14, s * 0.14, s * 0.04); ctx.fill();
-    ctx.fillStyle = a.skin;                                       // head
-    ctx.beginPath(); ctx.arc(x, by - s * 0.04, s * 0.055, 0, 6.3); ctx.fill();
+  // screen-space heading of an agent (project a short step ahead)
+  function headAngle(p) {
+    const g = tileToScreen(p.fc, p.fr, 0);
+    const h = tileToScreen(p.fc + (p.dx || 0.6) * 0.3, p.fr + (p.dy || 0) * 0.3, 0);
+    return Math.atan2(h.y - g.y, h.x - g.x);
   }
 
-  function drawDog(a) {
-    let { x, y, dx, dy } = agentPixel(a); const s = scrTile(); let lift = 0, peeT = 0;
-    if (a.state === 'pee') {
-      x += a.peeOx * s * 0.35; y += a.peeOy * s * 0.35;           // shuffle toward the pole/kerb
-      dx = a.peeOx; dy = a.peeOy; lift = 1; peeT = 1 - clamp(a.timer / 1.8, 0, 1);
-    }
-    if (dx === 0 && dy === 0) dx = 1;
-    const ang = Math.atan2(dy, dx), L = s * 0.15, H = s * 0.08;
-    ctx.save(); ctx.translate(x, y); ctx.rotate(ang);            // local +X = nose, -X = tail
+  function drawPed(a, p) {
+    const g = tileToScreen(p.fc, p.fr, 0), s = scrTW(), walking = a.state === 'walk';
+    const bob = walking ? Math.abs(Math.sin(a.phase)) * s * 0.04 : 0;
     ctx.fillStyle = 'rgba(0,0,0,0.22)';
-    ctx.beginPath(); ctx.ellipse(0, H * 0.8, L, H * 0.55, 0, 0, 6.3); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(g.x, g.y, s * 0.12, s * 0.06, 0, 0, 6.3); ctx.fill();
+    const foot = g.y - bob;
+    const sw = walking ? Math.sin(a.phase) * s * 0.06 : 0;
+    ctx.strokeStyle = '#2b2f36'; ctx.lineWidth = Math.max(1, s * 0.045);
+    ctx.beginPath();
+    ctx.moveTo(g.x - s * 0.03, foot - s * 0.16); ctx.lineTo(g.x - s * 0.03 + sw, foot);
+    ctx.moveTo(g.x + s * 0.03, foot - s * 0.16); ctx.lineTo(g.x + s * 0.03 - sw, foot);
+    ctx.stroke();
+    const by = foot - s * 0.34;
+    ctx.fillStyle = a.color;                                      // shirt
+    roundRect(ctx, g.x - s * 0.08, by, s * 0.16, s * 0.2, s * 0.05); ctx.fill();
+    ctx.fillStyle = a.skin;                                       // head
+    ctx.beginPath(); ctx.arc(g.x, by - s * 0.06, s * 0.07, 0, 6.3); ctx.fill();
+  }
+
+  function drawDog(a, p) {
+    const g = tileToScreen(p.fc, p.fr, 0), s = scrTW();
+    let lift = 0, peeT = 0, pp = p;
+    if (a.state === 'pee') { lift = 1; peeT = 1 - clamp(a.timer / 1.8, 0, 1); pp = { fc: p.fc, fr: p.fr, dx: a.peeOx, dy: a.peeOy }; }
+    const ang = headAngle(pp), L = s * 0.16, H = s * 0.09;
+    ctx.save(); ctx.translate(g.x, g.y); ctx.rotate(ang);
+    ctx.fillStyle = 'rgba(0,0,0,0.2)'; ctx.beginPath(); ctx.ellipse(0, 0, L, H * 0.6, 0, 0, 6.3); ctx.fill();
+    ctx.translate(0, -H);                                          // stand the dog up off the ground
     const sw = a.state === 'walk' ? Math.sin(a.phase) * s * 0.05 : 0;
-    ctx.strokeStyle = a.fur2; ctx.lineWidth = Math.max(1, s * 0.03);
+    ctx.strokeStyle = a.fur2; ctx.lineWidth = Math.max(1, s * 0.035);
     ctx.beginPath();
     ctx.moveTo(L * 0.5, 0); ctx.lineTo(L * 0.5 + sw, H);          // front leg
     if (lift) { ctx.moveTo(-L * 0.5, 0); ctx.lineTo(-L * 0.95, -H * 0.7); }  // cocked hind leg
@@ -900,40 +869,28 @@ function main() {
     ctx.stroke();
     ctx.fillStyle = a.fur;
     ctx.beginPath(); ctx.ellipse(0, 0, L, H, 0, 0, 6.3); ctx.fill();           // body
-    ctx.beginPath(); ctx.arc(L * 0.85, -H * 0.35, H * 0.95, 0, 6.3); ctx.fill(); // head
-    ctx.fillStyle = a.fur2;
-    ctx.beginPath(); ctx.arc(L * 0.78, -H * 1.0, H * 0.4, 0, 6.3); ctx.fill();   // ear
+    ctx.beginPath(); ctx.arc(L * 0.85, -H * 0.4, H, 0, 6.3); ctx.fill();        // head
     const wag = Math.sin(a.phase * 1.6) * 0.5;
-    ctx.strokeStyle = a.fur; ctx.lineWidth = Math.max(1, s * 0.045);
+    ctx.strokeStyle = a.fur; ctx.lineWidth = Math.max(1, s * 0.05);
     ctx.beginPath(); ctx.moveTo(-L * 0.9, -H * 0.2); ctx.lineTo(-L * 1.5, -H * 0.7 + wag * H); ctx.stroke(); // tail
-    if (lift && peeT > 0.2) {                                     // the deed
-      ctx.strokeStyle = 'rgba(240,222,84,0.85)'; ctx.lineWidth = Math.max(1, s * 0.025);
-      ctx.beginPath(); ctx.moveTo(-L * 0.7, H * 0.1); ctx.lineTo(-L * 1.05 - H * 0.5, H * 1.15); ctx.stroke();
+    if (lift && peeT > 0.2) {                                      // the deed
+      ctx.strokeStyle = 'rgba(240,222,84,0.85)'; ctx.lineWidth = Math.max(1, s * 0.03);
+      ctx.beginPath(); ctx.moveTo(-L * 0.7, H * 0.1); ctx.lineTo(-L * 1.05 - H * 0.5, H * 1.1); ctx.stroke();
     }
     ctx.restore();
   }
 
-  function drawCar(a) {
-    const { x, y, dx, dy } = agentPixel(a), s = scrTile();
-    const ang = Math.atan2(dy || 0, dx || 1), L = s * 0.36, W = s * 0.2;
-    ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
-    ctx.fillStyle = 'rgba(0,0,0,0.28)'; roundRect(ctx, -L / 2 + s * 0.02, -W / 2 + s * 0.03, L, W, s * 0.05); ctx.fill();
+  function drawCar(a, p) {
+    const g = tileToScreen(p.fc, p.fr, 0), s = scrTW(), ang = headAngle(p);
+    const L = s * 0.34, W = s * 0.2;
+    ctx.save(); ctx.translate(g.x, g.y - s * 0.07); ctx.rotate(ang);
+    ctx.fillStyle = 'rgba(0,0,0,0.22)'; roundRect(ctx, -L / 2 + s * 0.02, -W / 2 + s * 0.04, L, W, s * 0.05); ctx.fill();
     ctx.fillStyle = a.color; roundRect(ctx, -L / 2, -W / 2, L, W, s * 0.05); ctx.fill();
-    ctx.fillStyle = 'rgba(220,240,255,0.4)'; roundRect(ctx, -L * 0.06, -W * 0.34, L * 0.32, W * 0.68, s * 0.03); ctx.fill();
+    ctx.fillStyle = 'rgba(220,240,255,0.45)'; roundRect(ctx, -L * 0.05, -W * 0.34, L * 0.34, W * 0.68, s * 0.03); ctx.fill();
     ctx.fillStyle = 'rgba(255,240,180,0.95)';                     // headlights (front)
     ctx.fillRect(L * 0.42, -W * 0.34, s * 0.035, W * 0.22);
     ctx.fillRect(L * 0.42, W * 0.12, s * 0.035, W * 0.22);
     ctx.restore();
-  }
-
-  // lamppost — drawn into the static city buffer (it's infrastructure, not "life")
-  function drawPole(p) {
-    const x = p.x * TILE, y = p.y * TILE, s = TILE;
-    sctx.fillStyle = '#23262c'; sctx.fillRect(x - s * 0.045, y - s * 0.03, s * 0.09, s * 0.045);            // base
-    sctx.fillStyle = '#2a2e35'; sctx.fillRect(x - Math.max(1, s * 0.018), y - s * 0.36, Math.max(1.5, s * 0.036), s * 0.36); // post
-    sctx.fillStyle = '#3a3f47'; sctx.fillRect(x - s * 0.055, y - s * 0.42, s * 0.11, s * 0.07);             // lamp head
-    sctx.fillStyle = 'rgba(255,224,150,0.55)';
-    sctx.beginPath(); sctx.arc(x, y - s * 0.37, s * 0.05, 0, 6.3); sctx.fill();                              // glow
   }
 
   /* ---------- UI sync ---------- */
@@ -978,9 +935,8 @@ function main() {
 
   function tileFromEvent(e) {
     const rect = canvas.getBoundingClientRect();
-    const t = scrTile();
-    const c = Math.floor(((e.clientX - rect.left) - cam.x) / t);
-    const r = Math.floor(((e.clientY - rect.top)  - cam.y) / t);
+    const p = screenToTile(e.clientX - rect.left, e.clientY - rect.top);
+    const c = Math.floor(p.fc), r = Math.floor(p.fr);
     return inB(c, r) ? idx(c, r) : -1;
   }
 
@@ -1054,11 +1010,11 @@ function main() {
     e.preventDefault();
     const rect = canvas.getBoundingClientRect();
     const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
-    const t0 = scrTile();
-    const wx = (sx - cam.x) / t0, wy = (sy - cam.y) / t0;     // world tile under cursor
+    const S0 = scrScale();
+    const bx = (sx - cam.x) / S0, by = (sy - cam.y) / S0;     // buffer point under cursor
     cam.zoom = clamp(cam.zoom * Math.exp(-e.deltaY * 0.0015), 1, Z_MAX);
-    const t1 = scrTile();
-    cam.x = sx - wx * t1; cam.y = sy - wy * t1;               // keep that point under the cursor
+    const S1 = scrScale();
+    cam.x = sx - bx * S1; cam.y = sy - by * S1;               // keep that point under the cursor
     clampCam();
   }, { passive: false });
 

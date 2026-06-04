@@ -12,9 +12,10 @@ Pure vanilla **HTML + CSS + JavaScript** on a single `<canvas>`. You're the Mayo
 lay roads, drop a power plant, zone Residential / Commercial / Industrial, and
 keep the city solvent while it grows itself.
 
-- **High-res renderer** — full device-pixel-ratio canvas, smooth gradient terrain,
-  a meandering river with banks, detailed buildings whose windows light up when
-  powered.
+- **Isometric 3D** — the city is drawn in a tilted 2.5D view. Buildings are real
+  isometric blocks that grow with prosperity: residential rises from a little
+  cottage → house → townhouse → apartments → tower (red-roofed houses at low
+  levels), and windows light up when powered.
 - **Street life** — pedestrians stroll the pavements, dogs trot to lampposts and
   pee, and cars drive the roads. Toggle it with the **🚶 Street life** switch.
 - **Zoom & pan camera** — scroll to zoom in on the action, right-drag (or arrow
