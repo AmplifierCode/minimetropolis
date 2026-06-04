@@ -32,8 +32,8 @@ function main() {
     { id: 'bull',   type: T.GRASS,  name: 'Bulldoze',     ico: '⛏️', cost: 0,    key: '9' },
   ];
 
-  // Per-tile monthly upkeep
-  const UPKEEP = { [T.ROAD]: 1, [T.POWER]: 90, [T.POLICE]: 90, [T.FIRE]: 90, [T.PARK]: 2 };
+  // Per-tile monthly upkeep (rebalanced so a well-run city can actually run a surplus)
+  const UPKEEP = { [T.ROAD]: 0.5, [T.POWER]: 35, [T.POLICE]: 20, [T.FIRE]: 20, [T.PARK]: 1 };
   // Original build cost per tile type — bulldozing refunds half (a recovery lever when broke)
   const BUILD_COST = { [T.ROAD]: 10, [T.RES]: 50, [T.COM]: 60, [T.IND]: 60, [T.POWER]: 1800, [T.PARK]: 30, [T.POLICE]: 500, [T.FIRE]: 500 };
 
@@ -45,7 +45,7 @@ function main() {
   /* ---------- State ---------- */
   const N = GRID * GRID;
   let map;            // Array<{t,lvl,pwr}>
-  let money, tax, month, speed, lastNet;
+  let money, tax, month, speed, lastNet, lastIncome = 0, lastUpkeep = 0;
   let tool = TOOLS[0];
   let approval = 50;
   // demand (people units) and aggregate stats from last tick
@@ -359,13 +359,14 @@ function main() {
   }
 
   function economy() {
-    const income = (stats.pop * 0.85 + stats.comJobs * 1.0 + stats.indJobs * 0.9) * (tax / 100);
+    const income = (stats.pop * 2.4 + stats.comJobs * 2.8 + stats.indJobs * 2.6) * (tax / 100);
     let upkeep = 0;
     upkeep += stats.roads * UPKEEP[T.ROAD];
     upkeep += stats.plants * UPKEEP[T.POWER];
     upkeep += stats.police * UPKEEP[T.POLICE];
     upkeep += stats.fire * UPKEEP[T.FIRE];
     upkeep += stats.parks * UPKEEP[T.PARK];
+    lastIncome = Math.round(income); lastUpkeep = Math.round(upkeep);
     lastNet = Math.round(income - upkeep);
     money += lastNet;
 
@@ -942,6 +943,7 @@ function main() {
     const netEl = document.getElementById('stat-net');
     netEl.textContent = (lastNet >= 0 ? '+' : '') + fmtMoney(lastNet) + '/mo';
     netEl.className = 'sub ' + (lastNet >= 0 ? 'pos' : 'neg');
+    netEl.title = 'Tax income ' + fmtMoney(lastIncome) + '/mo  −  upkeep ' + fmtMoney(lastUpkeep) + '/mo';
 
     setRci('rci-r', demand.r);
     setRci('rci-c', demand.c);
