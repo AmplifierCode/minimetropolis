@@ -427,7 +427,7 @@ function main() {
     ctx.drawImage(scene, 0, 0, scene.width, scene.height,
                   cam.x * DPR, cam.y * DPR, bufW * S * DPR, bufH * S * DPR);
     ctx.restore();
-    drawAgents();
+    drawTallLayer();   // 3D objects + agents, depth-sorted, on top of the ground
     drawHover();
   }
 
@@ -442,29 +442,15 @@ function main() {
     g.closePath();
   }
 
-  // Full redraw of the isometric city into the offscreen buffer.
+  // Only the GROUND is cached in the buffer (re-rendered when the map changes).
+  // The 3D objects + agents are drawn live & depth-sorted each frame by
+  // drawTallLayer(), so buildings correctly occlude the people behind them.
   function renderScene() {
     sctx.clearRect(0, 0, bufW, bufH);
     rebuildNetwork();   // refresh road list, lampposts, agent counts
-
-    // PASS 1 — ground (grass / water / road / park / undeveloped plots)
     for (let r = 0; r < GRID; r++)
       for (let c = 0; c < GRID; c++)
         drawGroundIso(c, r, map[idx(c, r)]);
-
-    // PASS 2 — tall objects, back-to-front by (c + r) so nearer ones occlude farther
-    for (let d = 0; d <= 2 * (GRID - 1); d++) {
-      const cLo = Math.max(0, d - (GRID - 1)), cHi = Math.min(GRID - 1, d);
-      for (let c = cLo; c <= cHi; c++) {
-        const r = d - c, i = idx(c, r), tile = map[i], t = tile.t;
-        if (t === T.TREE)        drawTreeIso(c, r);
-        else if (t === T.POWER)  drawServiceIso(c, r, tile, '#7a6a34', '⚡', true);
-        else if (t === T.POLICE) drawServiceIso(c, r, tile, '#2f5296', '🚓', false);
-        else if (t === T.FIRE)   drawServiceIso(c, r, tile, '#9c3030', '🚒', false);
-        else if (isZone(t) && tile.lvl > 0) drawBuildingIso(c, r, tile);
-        if (poleByTile[i]) drawPoleIso(c, r);
-      }
-    }
   }
 
   function drawGroundIso(c, r, tile) {
@@ -514,20 +500,20 @@ function main() {
 
   function drawTreeIso(c, r) {
     const x = bX(c + 0.5, r + 0.5), gy = bY(c + 0.5, r + 0.5), R = TW * 0.26;
-    sctx.fillStyle = 'rgba(0,0,0,0.2)';
-    sctx.beginPath(); sctx.ellipse(x, gy, R * 0.9, R * 0.45, 0, 0, 7); sctx.fill();
-    sctx.fillStyle = '#5b3d22'; sctx.fillRect(x - TW * 0.03, gy - TH * 0.62, TW * 0.06, TH * 0.62);
-    sctx.fillStyle = '#274d1c'; sctx.beginPath(); sctx.arc(x, gy - TH * 0.72, R, 0, 7); sctx.fill();
-    sctx.fillStyle = '#356b27'; sctx.beginPath(); sctx.arc(x - R * 0.3, gy - TH * 0.92, R * 0.7, 0, 7); sctx.fill();
-    sctx.fillStyle = '#4f8f37'; sctx.beginPath(); sctx.arc(x - R * 0.42, gy - TH * 1.08, R * 0.42, 0, 7); sctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
+    ctx.beginPath(); ctx.ellipse(x, gy, R * 0.9, R * 0.45, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = '#5b3d22'; ctx.fillRect(x - TW * 0.03, gy - TH * 0.62, TW * 0.06, TH * 0.62);
+    ctx.fillStyle = '#274d1c'; ctx.beginPath(); ctx.arc(x, gy - TH * 0.72, R, 0, 7); ctx.fill();
+    ctx.fillStyle = '#356b27'; ctx.beginPath(); ctx.arc(x - R * 0.3, gy - TH * 0.92, R * 0.7, 0, 7); ctx.fill();
+    ctx.fillStyle = '#4f8f37'; ctx.beginPath(); ctx.arc(x - R * 0.42, gy - TH * 1.08, R * 0.42, 0, 7); ctx.fill();
   }
 
   function drawPoleIso(c, r) {
     const p = poleByTile[idx(c, r)];
     const x = bX(p.x, p.y), gy = bY(p.x, p.y), h = TH * 1.2;
-    sctx.fillStyle = '#23262c'; sctx.fillRect(x - Math.max(1, TW * 0.018), gy - h, Math.max(1.5, TW * 0.036), h);
-    sctx.fillStyle = '#3a3f47'; sctx.fillRect(x - TW * 0.05, gy - h - TH * 0.12, TW * 0.1, TH * 0.14);
-    sctx.fillStyle = 'rgba(255,224,150,0.6)'; sctx.beginPath(); sctx.arc(x, gy - h - TH * 0.02, TW * 0.05, 0, 7); sctx.fill();
+    ctx.fillStyle = '#23262c'; ctx.fillRect(x - Math.max(0.5, TW * 0.018), gy - h, Math.max(0.8, TW * 0.036), h);
+    ctx.fillStyle = '#3a3f47'; ctx.fillRect(x - TW * 0.05, gy - h - TH * 0.12, TW * 0.1, TH * 0.14);
+    ctx.fillStyle = 'rgba(255,224,150,0.6)'; ctx.beginPath(); ctx.arc(x, gy - h - TH * 0.02, TW * 0.05, 0, 7); ctx.fill();
   }
 
   const ZONE_PAL = {
@@ -543,21 +529,22 @@ function main() {
 
   // one extruded wall face spanning ground edge g0→g1 up to elevation H, with lit/dark windows
   function wallFace(g0, g1, H, color, rows, pwr) {
-    sctx.fillStyle = color;
-    sctx.beginPath();
-    sctx.moveTo(bX(g0[0], g0[1]), bY(g0[0], g0[1], 0));
-    sctx.lineTo(bX(g1[0], g1[1]), bY(g1[0], g1[1], 0));
-    sctx.lineTo(bX(g1[0], g1[1]), bY(g1[0], g1[1], H));
-    sctx.lineTo(bX(g0[0], g0[1]), bY(g0[0], g0[1], H));
-    sctx.closePath(); sctx.fill();
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(bX(g0[0], g0[1]), bY(g0[0], g0[1], 0));
+    ctx.lineTo(bX(g1[0], g1[1]), bY(g1[0], g1[1], 0));
+    ctx.lineTo(bX(g1[0], g1[1]), bY(g1[0], g1[1], H));
+    ctx.lineTo(bX(g0[0], g0[1]), bY(g0[0], g0[1], H));
+    ctx.closePath(); ctx.fill();
+    if (scrTW() < 26) return;                     // LOD: skip windows when buildings are small on screen
     const cols = 2, ww = TW * 0.06, wh = TH * 0.2;
     for (let wr = 0; wr < rows; wr++) {
       for (let wc = 0; wc < cols; wc++) {
         const u = (wc + 0.5) / cols, v = (wr + 0.42) / (rows + 0.25);
         const fc = g0[0] + (g1[0] - g0[0]) * u, fr = g0[1] + (g1[1] - g0[1]) * u;
         const lit = pwr && ((wr * 3 + wc * 7 + rows) % 4 !== 0);
-        sctx.fillStyle = lit ? 'rgba(255,224,150,0.95)' : (pwr ? 'rgba(190,205,220,0.5)' : 'rgba(35,48,62,0.72)');
-        sctx.fillRect(bX(fc, fr) - ww / 2, bY(fc, fr, v * H) - wh / 2, ww, wh);
+        ctx.fillStyle = lit ? 'rgba(255,224,150,0.95)' : (pwr ? 'rgba(190,205,220,0.5)' : 'rgba(35,48,62,0.72)');
+        ctx.fillRect(bX(fc, fr) - ww / 2, bY(fc, fr, v * H) - wh / 2, ww, wh);
       }
     }
   }
@@ -567,10 +554,10 @@ function main() {
     const t = tile.t, lv = tile.lvl, P = ZONE_PAL[t];
     const SH = TH * 0.82, H = STOREYS[t][lv] * SH, ins = INSET[t][lv];
     const a = c + ins, b = c + 1 - ins, p = r + ins, q = r + 1 - ins;
-    const N = [a, p], E = [b, p], S = [b, q], W = [a, q];
+    const E = [b, p], S = [b, q], W = [a, q];
     const rows = clamp(Math.round(STOREYS[t][lv]), 1, 5);
 
-    sctx.fillStyle = 'rgba(0,0,0,0.2)'; diamond(sctx, c + 0.06, r + 0.06, ins, 0); sctx.fill();  // shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.2)'; diamond(ctx, c + 0.06, r + 0.06, ins, 0); ctx.fill();  // shadow
     wallFace(W, S, H, P.bot, rows, tile.pwr);    // left wall (shaded)
     wallFace(S, E, H, P.top, rows, tile.pwr);    // right wall (lit)
 
@@ -578,30 +565,30 @@ function main() {
       const rise = SH * (t === T.RES ? 0.85 : 0.55);
       const ax = bX(c + 0.5, r + 0.5), ay = bY(c + 0.5, r + 0.5, H + rise);
       const slope = (g0, g1, col) => {
-        sctx.fillStyle = col; sctx.beginPath();
-        sctx.moveTo(bX(g0[0], g0[1]), bY(g0[0], g0[1], H));
-        sctx.lineTo(bX(g1[0], g1[1]), bY(g1[0], g1[1], H));
-        sctx.lineTo(ax, ay); sctx.closePath(); sctx.fill();
+        ctx.fillStyle = col; ctx.beginPath();
+        ctx.moveTo(bX(g0[0], g0[1]), bY(g0[0], g0[1], H));
+        ctx.lineTo(bX(g1[0], g1[1]), bY(g1[0], g1[1], H));
+        ctx.lineTo(ax, ay); ctx.closePath(); ctx.fill();
       };
       slope(W, S, shade(P.roof, -14));           // left slope
       slope(S, E, shade(P.roof, 14));            // right slope (lit)
     } else {                                     // flat roof slab
-      sctx.fillStyle = shade(P.roof, 16); diamond(sctx, c, r, ins, H); sctx.fill();
+      ctx.fillStyle = shade(P.roof, 16); diamond(ctx, c, r, ins, H); ctx.fill();
       if (lv >= 4) {                             // rooftop unit on towers
         const du = 0.16, rh = H + SH * 0.5;
-        sctx.fillStyle = shade(P.roof, -4);
-        sctx.beginPath();
-        sctx.moveTo(bX(c + 0.5 - du, r + 0.5 - du), bY(c + 0.5 - du, r + 0.5 - du, rh));
-        sctx.lineTo(bX(c + 0.5 + du, r + 0.5 - du), bY(c + 0.5 + du, r + 0.5 - du, rh));
-        sctx.lineTo(bX(c + 0.5 + du, r + 0.5 + du), bY(c + 0.5 + du, r + 0.5 + du, rh));
-        sctx.lineTo(bX(c + 0.5 - du, r + 0.5 + du), bY(c + 0.5 - du, r + 0.5 + du, rh));
-        sctx.closePath(); sctx.fill();
+        ctx.fillStyle = shade(P.roof, -4);
+        ctx.beginPath();
+        ctx.moveTo(bX(c + 0.5 - du, r + 0.5 - du), bY(c + 0.5 - du, r + 0.5 - du, rh));
+        ctx.lineTo(bX(c + 0.5 + du, r + 0.5 - du), bY(c + 0.5 + du, r + 0.5 - du, rh));
+        ctx.lineTo(bX(c + 0.5 + du, r + 0.5 + du), bY(c + 0.5 + du, r + 0.5 + du, rh));
+        ctx.lineTo(bX(c + 0.5 - du, r + 0.5 + du), bY(c + 0.5 - du, r + 0.5 + du, rh));
+        ctx.closePath(); ctx.fill();
       }
     }
     if (t === T.IND && lv >= 2) {                // factory chimney
       const fx = c + 0.72, fy = r + 0.72, ch = SH * 1.3;
-      sctx.fillStyle = '#6b5550';
-      sctx.fillRect(bX(fx, fy) - TW * 0.025, bY(fx, fy, H + ch), TW * 0.05, ch);
+      ctx.fillStyle = '#6b5550';
+      ctx.fillRect(bX(fx, fy) - TW * 0.025, bY(fx, fy, H + ch), TW * 0.05, ch);
     }
     if (!tile.pwr) noPowerIso(c, r, H + SH);
   }
@@ -610,24 +597,24 @@ function main() {
     const SH = TH * 0.82, H = SH * 1.7, ins = 0.14;
     const a = c + ins, b = c + 1 - ins, p = r + ins, q = r + 1 - ins;
     const S = [b, q], E = [b, p], W = [a, q];
-    sctx.fillStyle = 'rgba(0,0,0,0.2)'; diamond(sctx, c + 0.06, r + 0.06, ins, 0); sctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,0.2)'; diamond(ctx, c + 0.06, r + 0.06, ins, 0); ctx.fill();
     wallFace(W, S, H, shade(body, -16), 2, false);
     wallFace(S, E, H, shade(body, 12), 2, false);
-    sctx.fillStyle = shade(body, 30); diamond(sctx, c, r, ins, H); sctx.fill();
-    sctx.font = (TW * 0.46) + 'px -apple-system, "Segoe UI Emoji", sans-serif';
-    sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
-    sctx.fillText(glyphCh, bX(c + 0.5, r + 0.5), bY(c + 0.5, r + 0.5, H + TH * 0.5));
+    ctx.fillStyle = shade(body, 30); diamond(ctx, c, r, ins, H); ctx.fill();
+    ctx.font = (TW * 0.46) + 'px -apple-system, "Segoe UI Emoji", sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(glyphCh, bX(c + 0.5, r + 0.5), bY(c + 0.5, r + 0.5, H + TH * 0.5));
     if (!hideBadge && !tile.pwr) noPowerIso(c, r, H);
   }
 
   // small red ⚡ badge floating above an unpowered building
   function noPowerIso(c, r, H) {
     const x = bX(c + 0.5, r + 0.5), y = bY(c + 0.5, r + 0.5, H + TH * 0.5), rad = TW * 0.13;
-    sctx.fillStyle = 'rgba(120,20,20,0.92)';
-    sctx.beginPath(); sctx.arc(x, y, rad, 0, 7); sctx.fill();
-    sctx.fillStyle = '#ffd6d6'; sctx.font = (rad * 1.6) + 'px sans-serif';
-    sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
-    sctx.fillText('⚡', x, y + rad * 0.05);
+    ctx.fillStyle = 'rgba(120,20,20,0.92)';
+    ctx.beginPath(); ctx.arc(x, y, rad, 0, 7); ctx.fill();
+    ctx.fillStyle = '#ffd6d6'; ctx.font = (rad * 1.6) + 'px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('⚡', x, y + rad * 0.05);
   }
 
   // live hover cursor — an isometric diamond on the hovered tile
@@ -801,21 +788,54 @@ function main() {
     return { fc, fr, dx, dy };
   }
 
-  // draw the live layer, depth-sorted (by fc+fr) so nearer agents overlap farther ones
-  function drawAgents() {
-    if (!lifeOn) return;
+  // Draw all 3D objects (buildings/services/trees/lampposts) and live agents in a
+  // single back-to-front pass so buildings occlude the people & dogs behind them.
+  // Static objects draw in buffer space (via a canvas transform); agents draw in
+  // screen space — we flip the transform as the sorted list demands.
+  function drawTallLayer() {
     const items = [];
-    for (const m of marks) items.push({ m, d: m.x + m.y });
-    for (const a of cars) { const p = agentTile(a); items.push({ a, p, d: p.fc + p.fr - 0.1 }); }
-    for (const a of dogs) { const p = agentTile(a); items.push({ a, p, d: p.fc + p.fr }); }
-    for (const a of peds) { const p = agentTile(a); items.push({ a, p, d: p.fc + p.fr }); }
-    items.sort((u, v) => u.d - v.d);
-    for (const it of items) {
-      if (it.m) drawMark(it.m);
-      else if (it.a.kind === 'car') drawCar(it.a, it.p);
-      else if (it.a.kind === 'dog') drawDog(it.a, it.p);
-      else drawPed(it.a, it.p);
+    for (let r = 0; r < GRID; r++) {
+      for (let c = 0; c < GRID; c++) {
+        const i = idx(c, r), tile = map[i], t = tile.t, d = c + r + 1;   // tile-centre depth (matches agents)
+        if (t === T.TREE)        items.push({ k: 'tree', c, r, d });
+        else if (t === T.POWER)  items.push({ k: 'svc', c, r, tile, body: '#7a6a34', gl: '⚡', hb: true,  d });
+        else if (t === T.POLICE) items.push({ k: 'svc', c, r, tile, body: '#2f5296', gl: '🚓', hb: false, d });
+        else if (t === T.FIRE)   items.push({ k: 'svc', c, r, tile, body: '#9c3030', gl: '🚒', hb: false, d });
+        else if (isZone(t) && tile.lvl > 0) items.push({ k: 'bld', c, r, tile, d });
+        if (poleByTile[i]) items.push({ k: 'pole', c, r, d: d + 0.02 });
+      }
     }
+    if (lifeOn) {
+      for (const m of marks) items.push({ k: 'mark', m, d: m.x + m.y });
+      for (const a of cars) { const p = agentTile(a); items.push({ k: 'car', a, p, d: p.fc + p.fr - 0.05 }); }
+      for (const a of dogs) { const p = agentTile(a); items.push({ k: 'dog', a, p, d: p.fc + p.fr }); }
+      for (const a of peds) { const p = agentTile(a); items.push({ k: 'ped', a, p, d: p.fc + p.fr }); }
+    }
+    items.sort((u, v) => u.d - v.d);
+
+    const S = scrScale(), m = scrTW() * 3.5 + 40;   // cull margin big enough for the tallest tower
+    ctx.save();
+    let mode = 0;
+    const buf = () => { if (mode !== 1) { ctx.setTransform(S * DPR, 0, 0, S * DPR, cam.x * DPR, cam.y * DPR); mode = 1; } };
+    const scr = () => { if (mode !== 2) { ctx.setTransform(DPR, 0, 0, DPR, 0, 0); mode = 2; } };
+    for (const it of items) {
+      if (it.k === 'bld' || it.k === 'svc' || it.k === 'tree' || it.k === 'pole') {
+        const sp = tileToScreen(it.c + 0.5, it.r + 0.5, 0);
+        if (sp.x < -m || sp.x > viewW + m || sp.y < -m || sp.y > viewH + m) continue;
+        buf();
+        if (it.k === 'bld') drawBuildingIso(it.c, it.r, it.tile);
+        else if (it.k === 'svc') drawServiceIso(it.c, it.r, it.tile, it.body, it.gl, it.hb);
+        else if (it.k === 'tree') drawTreeIso(it.c, it.r);
+        else drawPoleIso(it.c, it.r);
+      } else {
+        scr();
+        if (it.k === 'mark') drawMark(it.m);
+        else if (it.k === 'car') drawCar(it.a, it.p);
+        else if (it.k === 'dog') drawDog(it.a, it.p);
+        else drawPed(it.a, it.p);
+      }
+    }
+    ctx.restore();
   }
 
   function drawMark(m) {
