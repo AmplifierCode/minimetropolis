@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mini Metropolis — a tiny city builder</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Top status bar -->
+    <header id="topbar">
+      <div class="brand">🏙️ <span>Mini Metropolis</span></div>
+      <div class="stat" title="City treasury">
+        <span class="label">Funds</span>
+        <span id="stat-money" class="value">$0</span>
+        <span id="stat-net" class="sub"></span>
+      </div>
+      <div class="stat" title="Total population">
+        <span class="label">Population</span>
+        <span id="stat-pop" class="value">0</span>
+      </div>
+      <div class="stat" title="In-game date">
+        <span class="label">Date</span>
+        <span id="stat-date" class="value">Jan 1900</span>
+      </div>
+      <div class="stat" title="Citizen approval">
+        <span class="label">Approval</span>
+        <span id="stat-approval" class="value">50%</span>
+      </div>
+
+      <div class="rci" title="Demand: Residential / Commercial / Industrial">
+        <div class="rci-col"><div class="rci-bar"><i id="rci-r"></i></div><span>R</span></div>
+        <div class="rci-col"><div class="rci-bar"><i id="rci-c"></i></div><span>C</span></div>
+        <div class="rci-col"><div class="rci-bar"><i id="rci-i"></i></div><span>I</span></div>
+      </div>
+
+      <div class="speed">
+        <button data-speed="0" title="Pause (space)">⏸</button>
+        <button data-speed="1" class="active" title="Normal speed">▶</button>
+        <button data-speed="2" title="Fast">▶▶</button>
+        <button data-speed="3" title="Turbo">▶▶▶</button>
+      </div>
+    </header>
+
+    <div id="main">
+      <!-- Tool palette -->
+      <aside id="toolbar">
+        <div id="tool-list"></div>
+        <div class="tax">
+          <label>Tax rate: <span id="tax-val">7</span>%</label>
+          <input id="tax-slider" type="range" min="0" max="20" value="7" />
+        </div>
+        <div class="save-row">
+          <button id="btn-save" title="Save to this browser">💾 Save</button>
+          <button id="btn-load" title="Load saved city">📂 Load</button>
+        </div>
+        <div class="save-row">
+          <button id="btn-new" title="Start a brand new city">🌱 New City</button>
+          <button id="btn-help" title="How to play">❔ Help</button>
+        </div>
+        <label class="life-toggle" title="Pedestrians, dogs &amp; traffic">
+          <input id="toggle-life" type="checkbox" checked /> 🚶 Street life
+        </label>
+        <div id="hint" class="hint"></div>
+      </aside>
+
+      <!-- The city -->
+      <main id="stage">
+        <canvas id="city"></canvas>
+        <div id="tooltip"></div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Help overlay -->
+  <div id="help-overlay" class="overlay hidden">
+    <div class="overlay-card">
+      <h2>How to play 🏙️</h2>
+      <p><b>Goal:</b> grow a thriving city. Balance housing (R), shops (C) and
+         industry (I), keep the lights on, and don't go broke.</p>
+      <ol>
+        <li><b>Build roads first.</b> Zones only develop if they're within 3 tiles of a road.</li>
+        <li><b>Add a power plant.</b> Power flows through roads &amp; buildings. Unpowered zones won't grow (look for the red ⚡).</li>
+        <li><b>Zone land.</b> Paint Residential, Commercial and Industrial areas. Buildings grow themselves over time when demand is positive.</li>
+        <li><b>Watch the RCI meter</b> (top right). Green bar up = that type is in demand, zone more of it. Bar down = oversupply.</li>
+        <li><b>Money:</b> taxes come in monthly from population &amp; jobs; roads, power and services cost upkeep. Tune the tax slider — too high and approval drops.</li>
+        <li><b>Services:</b> Police &amp; Fire stations and Parks raise land value, so nearby buildings grow taller.</li>
+      </ol>
+      <p class="muted">Tip: click-and-drag to paint roads and zones quickly.
+         <b>Scroll to zoom</b> in on the streets, right-drag (or arrow keys) to pan,
+         <b>0</b> resets the view.<br/>
+         Keys: <b>1–9</b> pick tools, <b>B</b> bulldoze, <b>Space</b> pause.</p>
+      <button id="btn-help-close">Got it — let's build</button>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
