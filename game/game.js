@@ -77,6 +77,7 @@ function main() {
      by cam.x/cam.y (screen px of the buffer's top-left). */
   const cam = { zoom: 1, x: 0, y: 0 };
   let baseTW = 24, TW = 48, TH = 24, ISO_OX = 0, ISO_OY = 0, maxH = 100;
+  let peek = 0, peekTarget = 0;   // 0 = normal, 1 = buildings flattened (hold Space to peek the streets)
   let viewW = 820, viewH = 820, DPR = 1, Z_MAX = 3, bufW = 0, bufH = 0;
 
   const scrScale = () => (baseTW * cam.zoom) / TW;   // buffer px -> screen px
@@ -84,7 +85,7 @@ function main() {
 
   // buffer-px projection of a continuous tile (fc,fr) at elevation h (buffer px)
   const bX = (fc, fr)    => ISO_OX + (fc - fr) * (TW / 2);
-  const bY = (fc, fr, h) => ISO_OY + (fc + fr) * (TH / 2) - (h || 0);
+  const bY = (fc, fr, h) => ISO_OY + (fc + fr) * (TH / 2) - (h || 0) * (1 - peek);   // peek flattens all elevation
 
   // continuous tile (fc,fr,elevation) -> screen px
   function tileToScreen(fc, fr, h) {
@@ -539,6 +540,17 @@ function main() {
     ctx.lineTo(bX(g1[0], g1[1]), bY(g1[0], g1[1], H));
     ctx.lineTo(bX(g0[0], g0[1]), bY(g0[0], g0[1], H));
     ctx.closePath(); ctx.fill();
+    // fake vertical light: ambient occlusion toward the base, soft highlight along the top
+    const band = (h0, h1, col) => {
+      ctx.fillStyle = col; ctx.beginPath();
+      ctx.moveTo(bX(g0[0], g0[1]), bY(g0[0], g0[1], h0));
+      ctx.lineTo(bX(g1[0], g1[1]), bY(g1[0], g1[1], h0));
+      ctx.lineTo(bX(g1[0], g1[1]), bY(g1[0], g1[1], h1));
+      ctx.lineTo(bX(g0[0], g0[1]), bY(g0[0], g0[1], h1));
+      ctx.closePath(); ctx.fill();
+    };
+    band(0, H * 0.42, 'rgba(0,0,0,0.17)');
+    band(H * 0.84, H, 'rgba(255,255,255,0.08)');
     if (scrTW() < 26) return;                     // LOD: skip windows when buildings are small on screen
     const cols = 2, ww = TW * 0.06, wh = TH * 0.2;
     for (let wr = 0; wr < rows; wr++) {
@@ -560,7 +572,10 @@ function main() {
     const E = [b, p], S = [b, q], W = [a, q];
     const rows = clamp(Math.round(STOREYS[t][lv]), 1, 5);
 
-    ctx.fillStyle = 'rgba(0,0,0,0.2)'; diamond(ctx, c + 0.06, r + 0.06, ins, 0); ctx.fill();  // shadow
+    // cast shadow on the ground — longer for taller buildings, shrinks as they flatten
+    const so = STOREYS[t][lv] * 0.07 * (1 - peek);
+    ctx.fillStyle = 'rgba(0,0,0,0.14)'; diamond(ctx, c - so * 0.5, r + so, ins - 0.03, 0); ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,0.16)'; diamond(ctx, c + 0.04, r + 0.05, ins, 0); ctx.fill();
     wallFace(W, S, H, P.bot, rows, tile.pwr);    // left wall (shaded)
     wallFace(S, E, H, P.top, rows, tile.pwr);    // right wall (lit)
 
@@ -573,10 +588,10 @@ function main() {
         ctx.lineTo(bX(g1[0], g1[1]), bY(g1[0], g1[1], H));
         ctx.lineTo(ax, ay); ctx.closePath(); ctx.fill();
       };
-      slope(W, S, shade(P.roof, -14));           // left slope
-      slope(S, E, shade(P.roof, 14));            // right slope (lit)
+      slope(W, S, shade(P.roof, -20));           // left slope (shadow side)
+      slope(S, E, shade(P.roof, 20));            // right slope (sunlit)
     } else {                                     // flat roof slab
-      ctx.fillStyle = shade(P.roof, 16); diamond(ctx, c, r, ins, H); ctx.fill();
+      ctx.fillStyle = shade(P.roof, 26); diamond(ctx, c, r, ins, H); ctx.fill();
       if (lv >= 4) {                             // rooftop unit on towers
         const du = 0.16, rh = H + SH * 0.5;
         ctx.fillStyle = shade(P.roof, -4);
@@ -1167,7 +1182,8 @@ function main() {
   window.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT') return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); return; }
-    if (e.key === ' ') { e.preventDefault(); setSpeed(speed === 0 ? 1 : 0); return; }
+    if (e.key === ' ') { e.preventDefault(); peekTarget = 1; return; }                 // hold to flatten & peek
+    if (e.key.toLowerCase() === 'p') { setSpeed(speed === 0 ? 1 : 0); return; }         // pause / resume
     if (e.key === '0') { resetView(); return; }
     if (e.key === '+' || e.key === '=') { zoomBy(1.2); return; }
     if (e.key === '-' || e.key === '_') { zoomBy(1 / 1.2); return; }
@@ -1180,6 +1196,7 @@ function main() {
     const tl = TOOLS.find((t) => t.key === e.key);
     if (tl) selectTool(tl.id);
   });
+  window.addEventListener('keyup', (e) => { if (e.key === ' ') peekTarget = 0; });   // release → raise buildings
 
   /* ---------- Save / Load ---------- */
   function save() {
@@ -1230,6 +1247,10 @@ function main() {
       while (acc >= interval) { acc -= interval; tick(); }
     } else {
       acc = 0;
+    }
+    if (peek !== peekTarget) {                       // animate the flatten/raise
+      const step = dt / 150;
+      peek = peekTarget > peek ? Math.min(peekTarget, peek + step) : Math.max(peekTarget, peek - step);
     }
     updateAgents(dt);
     render();
