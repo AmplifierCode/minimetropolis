@@ -29,11 +29,13 @@ function main() {
     { id: 'park',   type: T.PARK,   name: 'Park',         ico: '🌳', cost: 30,   key: '6' },
     { id: 'police', type: T.POLICE, name: 'Police',       ico: '🚓', cost: 500,  key: '7' },
     { id: 'fire',   type: T.FIRE,   name: 'Fire Station', ico: '🚒', cost: 500,  key: '8' },
-    { id: 'bull',   type: T.GRASS,  name: 'Bulldoze',     ico: '⛏️', cost: 2,    key: '9' },
+    { id: 'bull',   type: T.GRASS,  name: 'Bulldoze',     ico: '⛏️', cost: 0,    key: '9' },
   ];
 
   // Per-tile monthly upkeep
   const UPKEEP = { [T.ROAD]: 1, [T.POWER]: 90, [T.POLICE]: 90, [T.FIRE]: 90, [T.PARK]: 2 };
+  // Original build cost per tile type — bulldozing refunds half (a recovery lever when broke)
+  const BUILD_COST = { [T.ROAD]: 10, [T.RES]: 50, [T.COM]: 60, [T.IND]: 60, [T.POWER]: 1800, [T.PARK]: 30, [T.POLICE]: 500, [T.FIRE]: 500 };
 
   const PLANT_CAPACITY = 130; // consumer tiles a single power plant can feed
   const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -138,6 +140,7 @@ function main() {
 
   function newCity() {
     genMap();
+    undoStack.length = 0; curBatch = null;
     money = 20000;
     tax = 7;
     month = 0;       // Jan 1900
@@ -427,8 +430,8 @@ function main() {
     ctx.drawImage(scene, 0, 0, scene.width, scene.height,
                   cam.x * DPR, cam.y * DPR, bufW * S * DPR, bufH * S * DPR);
     ctx.restore();
-    drawTallLayer();   // 3D objects + agents, depth-sorted, on top of the ground
-    drawHover();
+    drawHover();       // tile highlight on the ground, BENEATH the buildings (so it doesn't slice them)
+    drawTallLayer();   // 3D objects + agents, depth-sorted, on top
   }
 
   // path the diamond footprint of tile (c,r), inset by `ins` tiles, at elevation h
@@ -953,6 +956,29 @@ function main() {
   /* ---------- Input ---------- */
   let painting = false, lastPaint = -1;
 
+  /* ---------- Undo (Cmd/Ctrl+Z), batched per drag-stroke ---------- */
+  let undoStack = [], curBatch = null;
+  function beginBatch() { curBatch = { tiles: [], seen: new Set(), delta: 0 }; }
+  function snapshot(i) {                               // record a tile's state before it changes
+    if (!curBatch || curBatch.seen.has(i)) return;
+    curBatch.seen.add(i);
+    const t = map[i];
+    curBatch.tiles.push({ i, t: t.t, lvl: t.lvl, pwr: t.pwr });
+  }
+  function spend(dm) { money += dm; if (curBatch) curBatch.delta += dm; }   // money change, tracked for undo
+  function endBatch() {
+    if (curBatch && curBatch.tiles.length) { undoStack.push(curBatch); if (undoStack.length > 80) undoStack.shift(); }
+    curBatch = null;
+  }
+  function undo() {
+    const b = undoStack.pop();
+    if (!b) { setHint('Nothing to undo.'); return; }
+    for (const s of b.tiles) { const t = map[s.i]; t.t = s.t; t.lvl = s.lvl; t.pwr = s.pwr; }
+    money -= b.delta;                                  // reverse the stroke's money change
+    fullStatsPass(); updateUI(); markDirty();
+    setHint('↩︎ Undone (' + b.tiles.length + ' tile' + (b.tiles.length > 1 ? 's' : '') + ').');
+  }
+
   function tileFromEvent(e) {
     const rect = canvas.getBoundingClientRect();
     const p = screenToTile(e.clientX - rect.left, e.clientY - rect.top);
@@ -968,8 +994,9 @@ function main() {
     if (tool.id === 'bull') {
       if (tile.t === T.GRASS) return;
       if (tile.t === T.WATER) { setHint("Can't bulldoze water."); return; }
-      if (money < tool.cost) { brokeHint(); return; }
-      money -= tool.cost;
+      snapshot(i);                                     // always allowed — even when you're broke
+      const refund = Math.round((BUILD_COST[tile.t] || 0) * 0.5);
+      if (refund) { spend(refund); setHint('⛏️ Demolished · +' + fmtMoney(refund) + ' refund.'); }
       tile.t = T.GRASS; tile.lvl = 0; tile.pwr = false;
       afterEdit();
       return;
@@ -981,7 +1008,7 @@ function main() {
     if (tile.t === tool.type && isZone(tool.type)) return;  // already zoned same
 
     if (money < tool.cost) { brokeHint(); return; }
-    money -= tool.cost;
+    snapshot(i); spend(-tool.cost);
     tile.t = tool.type;
     tile.lvl = 0;
     afterEdit();
@@ -1004,9 +1031,11 @@ function main() {
       canvas.style.cursor = 'grabbing'; e.preventDefault(); return;
     }
     painting = true; lastPaint = -1;
+    beginBatch();
     place(tileFromEvent(e));
   });
   window.addEventListener('mouseup', () => {
+    if (painting) endBatch();
     painting = false; lastPaint = -1;
     if (panning) { panning = false; canvas.style.cursor = 'crosshair'; }
   });
@@ -1054,9 +1083,11 @@ function main() {
       else if (!hasRoadNear(i)) txt += ' · 🚧 no road nearby';
     }
     tooltip.textContent = txt;
-    const rect = canvas.parentElement.getBoundingClientRect();
-    tooltip.style.left = (e.clientX - rect.left + 14) + 'px';
-    tooltip.style.top = (e.clientY - rect.top + 14) + 'px';
+    // fixed pill at the top of the map — never covers the tile you're pointing at
+    tooltip.style.left = '50%';
+    tooltip.style.top = '10px';
+    tooltip.style.bottom = 'auto';
+    tooltip.style.transform = 'translateX(-50%)';
     tooltip.style.display = 'block';
   }
 
@@ -1135,6 +1166,7 @@ function main() {
 
   window.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT') return;
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); return; }
     if (e.key === ' ') { e.preventDefault(); setSpeed(speed === 0 ? 1 : 0); return; }
     if (e.key === '0') { resetView(); return; }
     if (e.key === '+' || e.key === '=') { zoomBy(1.2); return; }
@@ -1173,6 +1205,7 @@ function main() {
         map[i] = { t: data.types[i], lvl: data.levels[i] || 0, pwr: false };
       }
       money = data.money; tax = data.tax; month = data.month;
+      undoStack.length = 0; curBatch = null;
       document.getElementById('tax-slider').value = tax;
       document.getElementById('tax-val').textContent = tax;
       fullStatsPass();
